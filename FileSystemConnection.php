@@ -35,6 +35,11 @@ class FileSystemConnection extends Component
      */
     public $checkIsAlias = true;
     /**
+     * @var bool
+     */
+    public $copyOnLinkFail = true;
+
+    /**
      * @var FileSystemTransaction the currently active transaction
      */
     private $_transaction;
@@ -58,6 +63,11 @@ class FileSystemConnection extends Component
         }
     }
 
+    /**
+     * @param $fileName
+     *
+     * @return string
+     */
     private function prepareFileName($fileName)
     {
         if ($this->checkIsAlias && (false !== ($newFileName = Yii::getAlias($fileName, $this->throwAliasException)))) {
@@ -73,7 +83,14 @@ class FileSystemConnection extends Component
         $this->commitDeleteContainer->add($fileName);
     }
 
-    public function link($target, $original)
+    /**
+     * @param string    $target
+     * @param string    $original
+     * @param bool|null $copyOnLinkFail
+     *
+     * @return bool
+     */
+    public function link($target, $original, $copyOnLinkFail = null)
     {
         $target   = $this->prepareFileName($target);
         $original = $this->prepareFileName($original);
@@ -81,7 +98,13 @@ class FileSystemConnection extends Component
         $this->ensureDirectory($target);
 
         if (!@link($target, $original)) {
-            return;
+            if ((null !== $copyOnLinkFail) ? $copyOnLinkFail : $this->copyOnLinkFail) {
+                if (!@copy($target, $original)) {
+                    return false;
+                }
+            } else {
+                return false;
+            }
         }
 
         if ($this->isInTransaction) {
@@ -91,7 +114,7 @@ class FileSystemConnection extends Component
 
     private function ensureDirectory($fileName)
     {
-        return FileHelper::createDirectory(StringHelper::dirname($fileName));
+        return FileHelper::createDirectory($dirName = StringHelper::dirname($fileName)) && is_writable($dirName);
     }
 
     private function rollBackDeleteAdd($fileName)
