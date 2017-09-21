@@ -10,10 +10,14 @@ namespace kadanin\fs;
 
 use Yii;
 use yii\base\Component;
+use yii\di\Instance;
 use yii\helpers\FileHelper;
 use yii\helpers\StringHelper;
+use yii\i18n\PhpMessageSource;
 
 /**
+ * @property OperationsOptions           $operationsOptions
+ *
  * @property-read FileSystemTransaction  $transaction
  * @property-read FilesToDeleteContainer $commitDeleteContainer
  * @property-read FilesToDeleteContainer $rollBackDeleteContainer
@@ -33,12 +37,7 @@ class FileSystem extends Component
     /**
      * @var bool
      */
-    public $checkIsAlias = true;
-    /**
-     * @var bool
-     */
-    public $copyOnLinkFail = true;
-
+    public $checkFileNameIsAlias = true;
     /**
      * @var FileSystemTransaction the currently active transaction
      */
@@ -51,30 +50,105 @@ class FileSystem extends Component
      * @var FilesToDeleteContainer
      */
     private $_rollBackDeleteContainer;
+    /**
+     * @var OperationsOptions
+     */
+    private $_operationsOptions;
 
-    public function unlink($fileName)
+    /**
+     * @param \Closure $closure
+     *
+     * @return bool
+     */
+    public function isSuccessful(\Closure $closure)
+    {
+        try {
+            return $closure();
+        } catch (NonExistingFileDeletionException $nonExistingFileDeletionException) {
+            return true;
+        } catch (FileSystemException $exception) {
+            Yii::warning($exception->getMessage(), __METHOD__);
+            unset($exception);
+        }
+
+        return false;
+    }
+
+    /**
+     * @param string                       $fileName
+     * @param OperationsOptions|array|null $operationsOptions
+     *
+     * @return bool
+     *
+     * @throws \kadanin\fs\NonExistingFileDeletionException
+     * @throws \yii\base\InvalidParamException
+     * @throws \yii\base\InvalidConfigException
+     * @throws \kadanin\fs\FileSystemException
+     *
+     */
+    public function unlink($fileName, OperationsOptions $operationsOptions = null)
     {
         $fileName = $this->prepareFileName($fileName);
+
+        $operationsOptions = $this->ensureOptions($operationsOptions);
+
+        if (!is_file($fileName)) {
+            if ($operationsOptions->throwFailures && $operationsOptions->throwUnlinkingNotExistingFile) {
+                throw Yii::createObject(NonExistingFileDeletionException::class, [Yii::t('kadanin/fs/errors', 'Deleting not existing file {fileName}', ['fileName' => $fileName])]);
+            }
+
+            return true;
+        }
+
+        if (!is_writable($fileName)) {
+            if ($operationsOptions->throwNotWritable) {
+                throw FS::e(Yii::t('kadanin/fs/errors', 'File not writable: {fileName}', ['fileName' => $fileName]));
+            }
+
+            return false;
+        }
 
         if ($this->isInTransaction) {
             $this->commitDeleteAdd($fileName);
         } else {
-            @unlink($fileName);
+            try {
+                if (!unlink($fileName) && is_file($fileName)) {
+                    return FS::fail(Yii::t('kadanin/fs/errors', 'Unknown error when deleting file {fileName}', ['fileName' => $fileName]), $operationsOptions);
+                }
+
+                return true;
+            } catch (\Exception $exception) {
+                return FS::fail(Yii::t('kadanin/fs/errors', 'Unknown error when deleting file {fileName}', ['fileName' => $fileName]), $operationsOptions, [], 0, $exception);
+            }
         }
+
+        return true;
     }
 
     /**
      * @param $fileName
      *
      * @return string
+     * @throws \yii\base\InvalidParamException
      */
     private function prepareFileName($fileName)
     {
-        if ($this->checkIsAlias && (false !== ($newFileName = Yii::getAlias($fileName, $this->throwAliasException)))) {
+        if ($this->checkFileNameIsAlias && (false !== ($newFileName = Yii::getAlias($fileName, $this->throwAliasException)))) {
             return $newFileName;
         }
 
         return $fileName;
+    }
+
+    /**
+     * @param OperationsOptions|array|null $operationsOptions
+     *
+     * @return OperationsOptions
+     * @throws \yii\base\InvalidConfigException
+     */
+    private function ensureOptions($operationsOptions)
+    {
+        return (null === $operationsOptions) ? $this->operationsOptions : Instance::ensure($operationsOptions, OperationsOptions::class);
     }
 
     private function commitDeleteAdd($fileName)
@@ -84,34 +158,63 @@ class FileSystem extends Component
     }
 
     /**
-     * @param string    $target
-     * @param string    $original
-     * @param bool|null $copyOnLinkFail
+     * @param string                       $original
+     * @param string                       $target
+     * @param OperationsOptions|array|null $operationsOptions
      *
      * @return bool
+     * @throws \kadanin\fs\FileSystemException
+     * @throws \yii\base\InvalidParamException
+     * @throws \yii\base\InvalidConfigException
      */
-    public function link($target, $original, $copyOnLinkFail = null)
+    public function link($original, $target, OperationsOptions $operationsOptions = null)
     {
+        $operationsOptions = $this->ensureOptions($operationsOptions);
+
         $target   = $this->prepareFileName($target);
         $original = $this->prepareFileName($original);
 
+        if (!is_file($original)) {
+            return FS::fail(Yii::t('kadanin/fs/errors', 'Tying to link non existing file: {fileName}', ['fileName' => $original]), $operationsOptions);
+        }
+
         $this->ensureDirectory($target);
 
-        if (!@link($target, $original)) {
-            if ((null !== $copyOnLinkFail) ? $copyOnLinkFail : $this->copyOnLinkFail) {
-                if (!@copy($target, $original)) {
-                    return false;
+        $e = null;
+
+        try {
+            if (link($target, $original)) {
+                if ($this->isInTransaction) {
+                    $this->rollBackDeleteAdd($target);
                 }
-            } else {
-                return false;
+
+                return true;
             }
+        } catch (\Exception $e) {
         }
 
-        if ($this->isInTransaction) {
-            $this->rollBackDeleteAdd($target);
+        if (!$operationsOptions->copyOnLinkFail) {
+            return FS::fail(Yii::t('kadanin/fs/errors', 'Fail to link file: {original} -> {target}', [
+                'original' => $original,
+                'target'   => $target,
+            ]), $operationsOptions, [], 0, $e);
         }
 
-        return true;
+        try {
+            if (copy($original, $target)) {
+                if ($this->isInTransaction) {
+                    $this->rollBackDeleteAdd($target);
+                }
+
+                return true;
+            }
+        } catch (\Exception $e) {
+        }
+
+        return FS::fail(Yii::t('kadanin/fs/errors', 'Fail to link and copy file: {original} -> {target}', [
+            'original' => $original,
+            'target'   => $target,
+        ]), $operationsOptions, [], 0, $e);
     }
 
     private function ensureDirectory($fileName)
@@ -125,43 +228,149 @@ class FileSystem extends Component
         $this->rollBackDeleteContainer->add($fileName);
     }
 
-    public function move($target, $original)
+    /**
+     * @param string                       $original
+     * @param string                       $target
+     * @param OperationsOptions|array|null $operationsOptions
+     *
+     * @return bool
+     *
+     * @throws \yii\base\Exception
+     * @throws \yii\base\InvalidParamException
+     * @throws \yii\base\InvalidConfigException
+     * @throws \kadanin\fs\FileSystemException
+     */
+    public function move($original, $target, OperationsOptions $operationsOptions = null)
     {
-        $target   = $this->prepareFileName($target);
-        $original = $this->prepareFileName($original);
-
-        if ($this->isInTransaction) {
-            if (!@link($target, $original) && !@copy($original, $target)) {
-                return;
-            }
-            $this->rollBackDeleteAdd($target);
-        } else {
-            rename($original, $target);
-        }
+        return $this->moveInternal($original, $target, $operationsOptions, false);
     }
 
-    public function moveUploaded($target, $original)
+    /**
+     * @param string                       $original
+     * @param string                       $target
+     * @param OperationsOptions|array|null $operationsOptions
+     * @param bool                         $uploaded
+     *
+     * @return bool
+     *
+     * @throws \yii\base\Exception
+     * @throws \kadanin\fs\FileSystemException
+     * @throws \yii\base\InvalidConfigException
+     * @throws \yii\base\InvalidParamException
+     */
+    private function moveInternal($original, $target, OperationsOptions $operationsOptions = null, $uploaded)
     {
+        $uploaded = (bool)$uploaded;
+
+        $operationsOptions = $this->ensureOptions($operationsOptions);
+
         $target   = $this->prepareFileName($target);
         $original = $this->prepareFileName($original);
 
-        if ($this->isInTransaction) {
-            if (!is_uploaded_file($original)) {
-                return;
-            }
-            if (!@rename($original, $target)) {
-                return;
-            }
-            $this->commitDeleteAdd($original);
-            $this->rollBackDeleteAdd($target);
-        } else {
-            move_uploaded_file($original, $target);
+        if (!is_file($original)) {
+            return FS::fail(Yii::t('kadanin/fs/errors', 'Tying to move non existing file: {fileName}', ['fileName' => $original]), $operationsOptions);
         }
+
+        if ($uploaded && !is_uploaded_file($original)) {
+            return FS::fail(Yii::t('kadanin/fs/errors', 'File is not uploaded: {fileName}', ['fileName' => $original]), $operationsOptions);
+        }
+
+        $targetDir = StringHelper::dirname($target);
+
+        if (!FileHelper::createDirectory($targetDir)) {
+            return FS::fail(Yii::t('kadanin/fs/errors', 'Failed to create directory: {directory}', ['directory' => $targetDir]), $operationsOptions);
+        }
+
+        if (!is_writable($targetDir)) {
+            return FS::fail(Yii::t('kadanin/fs/errors', 'Directory is not writable: {directory}', ['directory' => $targetDir]), $operationsOptions);
+        }
+
+        $e = null;
+
+
+        if (!$this->isInTransaction) {
+            try {
+                if ($uploaded ? move_uploaded_file($original, $target) : rename($original, $target)) {
+                    return true;
+                }
+            } catch (\Exception $e) {
+            }
+
+            $message = $uploaded
+                ? Yii::t('kadanin/fs/errors', 'Failed to move uploaded file: {original} -> {target}', ['original' => $original, 'target' => $target])
+                : Yii::t('kadanin/fs/errors', 'Failed to rename/move: {original} -> {target}', ['original' => $original, 'target' => $target]) //
+            ;
+
+            return FS::fail($message, $operationsOptions, [], 0, $e);
+        }
+
+
+        $triedToCopy = false;
+
+        try {
+            if (link($target, $original) || ($triedToCopy = false) || copy($original, $target)) {
+                $this->commitDeleteAdd($original);
+                $this->rollBackDeleteAdd($target);
+
+                return true;
+            }
+        } catch (\Exception $e) {
+        }
+
+        $message = $this->moveMessage($uploaded, $triedToCopy, $original, $target);
+
+        return FS::fail($message, $operationsOptions, [], 0, $e);
+    }
+
+    /**
+     * @param bool   $uploaded
+     * @param bool   $triedToCopy
+     * @param string $original
+     * @param string $target
+     *
+     * @return string
+     */
+    private function moveMessage($uploaded, $triedToCopy, $original, $target)
+    {
+        $uploaded    = (bool)$uploaded;
+        $triedToCopy = (bool)$triedToCopy;
+
+        switch ([$uploaded, $triedToCopy]) {
+            case [true, true]:
+                return Yii::t('kadanin/fs/errors', 'Failed to copy uploaded file (transactional moving): {original} -> {target}', ['original' => $original, 'target' => $target]);
+            case [true, false]:
+                return Yii::t('kadanin/fs/errors', 'Failed to link uploaded file (transactional moving): {original} -> {target}', ['original' => $original, 'target' => $target]);
+            case [false, true]:
+                return Yii::t('kadanin/fs/errors', 'Failed to copy (transactional moving): {original} -> {target}', ['original' => $original, 'target' => $target]);
+            case [false, false]:
+                return Yii::t('kadanin/fs/errors', 'Failed to link (transactional moving): {original} -> {target}', ['original' => $original, 'target' => $target]);
+        }
+
+        return 'WTF IN ' . __METHOD__;
+    }
+
+    /**
+     * @param string                       $original
+     * @param string                       $target
+     * @param OperationsOptions|array|null $operationsOptions
+     *
+     * @return bool
+     *
+     * @throws \yii\base\Exception
+     * @throws \kadanin\fs\FileSystemException
+     * @throws \yii\base\InvalidConfigException
+     * @throws \yii\base\InvalidParamException
+     */
+    public function moveUploaded($original, $target, OperationsOptions $operationsOptions = null)
+    {
+        return $this->moveInternal($original, $target, $operationsOptions, true);
     }
 
     public function init()
     {
         parent::init();
+
+        $this->registerTranslations();
 
         if ($this->registerShutdownRollBack && $this->beforeShutdownRegister()) {
             register_shutdown_function(function () {
@@ -175,6 +384,19 @@ class FileSystem extends Component
                 }
             });
         }
+    }
+
+    private function registerTranslations()
+    {
+        if (isset(Yii::$app->i18n->translations['kadanin/fs/errors'])) {
+            return;
+        }
+
+        Yii::$app->i18n->translations['kadanin/fs/errors'] = [
+            'class'          => PhpMessageSource::class,
+            'sourceLanguage' => 'en-US',
+            'basePath'       => __DIR__ . '/messages',
+        ];
     }
 
     protected function beforeShutdownRegister()
@@ -260,6 +482,7 @@ class FileSystem extends Component
     /**
      * @see commitDeleteContainer
      * @see [[commitDeleteContainer]]
+     *
      * @return FilesToDeleteContainer
      */
     public function getCommitDeleteContainer()
@@ -282,5 +505,33 @@ class FileSystem extends Component
     public function getIsInTransaction()
     {
         return (null !== ($transaction = $this->getTransaction())) && $transaction->isActive;
+    }
+
+    /**
+     * @see operationsOptions
+     * @see [[operationsOptions]]
+     *
+     * @return OperationsOptions
+     */
+    public function getOperationsOptions()
+    {
+        if (null === $this->_operationsOptions) {
+            $this->_operationsOptions = Yii::createObject(OperationsOptions::class);
+        }
+
+        return $this->_operationsOptions;
+    }
+
+    /**
+     * @see operationsOptions
+     * @see [[operationsOptions]]
+     *
+     * @param OperationsOptions|array $newValue
+     *
+     * @throws \yii\base\InvalidConfigException
+     */
+    public function setOperationsOptions($newValue)
+    {
+        $this->_operationsOptions = Instance::ensure($newValue, OperationsOptions::class);
     }
 }
