@@ -19,7 +19,7 @@ use yii\helpers\StringHelper;
  * @property-read FilesToDeleteContainer $rollBackDeleteContainer
  * @property-read bool                   $isInTransaction
  */
-class FileSystemConnection extends Component
+class FileSystem extends Component
 {
     const EVENT_BEGIN_TRANSACTION    = 'beginTransaction';
     const EVENT_COMMIT_TRANSACTION   = 'commitTransaction';
@@ -110,6 +110,8 @@ class FileSystemConnection extends Component
         if ($this->isInTransaction) {
             $this->rollBackDeleteAdd($target);
         }
+
+        return true;
     }
 
     private function ensureDirectory($fileName)

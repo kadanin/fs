@@ -19,7 +19,7 @@ use yii\base\Object;
 class FileSystemTransaction extends Object
 {
     /**
-     * @var FileSystemConnection the database connection that this transaction is associated with.
+     * @var FileSystem the database connection that this transaction is associated with.
      */
     public $db;
 
