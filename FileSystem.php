@@ -148,6 +148,7 @@ class FileSystem extends Component
      */
     private function ensureOptions($operationsOptions)
     {
+        /** @noinspection PhpIncompatibleReturnTypeInspection */
         return (null === $operationsOptions) ? $this->operationsOptions : Instance::ensure($operationsOptions, OperationsOptions::class);
     }
 
@@ -169,6 +170,22 @@ class FileSystem extends Component
      */
     public function link($original, $target, OperationsOptions $operationsOptions = null)
     {
+        return $this->copyInternal($original, $target, $operationsOptions, true);
+    }
+
+    /**
+     * @param string                       $original
+     * @param string                       $target
+     * @param OperationsOptions|array|null $operationsOptions
+     * @param bool                         $doLink
+     *
+     * @return bool
+     * @throws \kadanin\fs\FileSystemException
+     * @throws \yii\base\InvalidParamException
+     * @throws \yii\base\InvalidConfigException
+     */
+    private function copyInternal($original, $target, OperationsOptions $operationsOptions = null, $doLink)
+    {
         $operationsOptions = $this->ensureOptions($operationsOptions);
 
         $target   = $this->prepareFileName($target);
@@ -182,22 +199,24 @@ class FileSystem extends Component
 
         $e = null;
 
-        try {
-            if (link($target, $original)) {
-                if ($this->isInTransaction) {
-                    $this->rollBackDeleteAdd($target);
+        if ($doLink) {
+            try {
+                if (link($target, $original)) {
+                    if ($this->isInTransaction) {
+                        $this->rollBackDeleteAdd($target);
+                    }
+
+                    return true;
                 }
-
-                return true;
+            } catch (\Exception $e) {
             }
-        } catch (\Exception $e) {
-        }
 
-        if (!$operationsOptions->copyOnLinkFail) {
-            return FS::fail(Yii::t('kadanin/fs/errors', 'Fail to link file: {original} -> {target}', [
-                'original' => $original,
-                'target'   => $target,
-            ]), $operationsOptions, [], 0, $e);
+            if (!$operationsOptions->copyOnLinkFail) {
+                return FS::fail(Yii::t('kadanin/fs/errors', 'Fail to link file: {original} -> {target}', [
+                    'original' => $original,
+                    'target'   => $target,
+                ]), $operationsOptions, [], 0, $e);
+            }
         }
 
         try {
@@ -211,10 +230,12 @@ class FileSystem extends Component
         } catch (\Exception $e) {
         }
 
-        return FS::fail(Yii::t('kadanin/fs/errors', 'Fail to link and copy file: {original} -> {target}', [
-            'original' => $original,
-            'target'   => $target,
-        ]), $operationsOptions, [], 0, $e);
+        $message = $doLink
+            ? Yii::t('kadanin/fs/errors', 'Fail to link and copy file: {original} -> {target}', ['original' => $original, 'target' => $target])
+            : Yii::t('kadanin/fs/errors', 'Fail to copy file: {original} -> {target}', ['original' => $original, 'target' => $target]) //
+        ;
+
+        return FS::fail($message, $operationsOptions, [], 0, $e);
     }
 
     private function ensureDirectory($fileName)
@@ -226,6 +247,21 @@ class FileSystem extends Component
     {
         $fileName = $this->prepareFileName($fileName);
         $this->rollBackDeleteContainer->add($fileName);
+    }
+
+    /**
+     * @param string                       $original
+     * @param string                       $target
+     * @param OperationsOptions|array|null $operationsOptions
+     *
+     * @return bool
+     * @throws \kadanin\fs\FileSystemException
+     * @throws \yii\base\InvalidParamException
+     * @throws \yii\base\InvalidConfigException
+     */
+    public function copy($original, $target, OperationsOptions $operationsOptions = null)
+    {
+        return $this->copyInternal($original, $target, $operationsOptions, false);
     }
 
     /**
