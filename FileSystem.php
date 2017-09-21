@@ -424,11 +424,11 @@ class FileSystem extends Component
 
     private function registerTranslations()
     {
-        if (isset(Yii::$app->i18n->translations['kadanin/fs/errors'])) {
+        if (isset(Yii::$app->i18n->translations['kadanin/fs'])) {
             return;
         }
 
-        Yii::$app->i18n->translations['kadanin/fs/errors'] = [
+        Yii::$app->i18n->translations['kadanin/fs'] = [
             'class'          => PhpMessageSource::class,
             'sourceLanguage' => 'en-US',
             'basePath'       => __DIR__ . '/messages',
