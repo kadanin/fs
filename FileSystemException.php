@@ -15,9 +15,9 @@ class FileSystemException extends Exception
     /**
      * Constructor.
      *
-     * @param string     $message   PDO error message
-     * @param array      $errorInfo PDO error info
-     * @param int        $code      PDO error code
+     * @param string     $message   Error message
+     * @param array      $errorInfo Error info
+     * @param int        $code      Error code
      * @param \Exception $previous  The previous exception used for the exception chaining.
      */
     public function __construct($message, $errorInfo = [], $code = 0, \Exception $previous = null)
